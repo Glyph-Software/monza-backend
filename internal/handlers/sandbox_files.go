@@ -3,6 +3,7 @@ package handlers
 import (
 	"archive/tar"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -175,6 +176,10 @@ func (h *FilesHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 
 	rc, err := h.manager.DownloadFile(r.Context(), id, srcPath)
 	if err != nil {
+		if errors.Is(err, sandbox.ErrFileNotFound) {
+			http.NotFound(w, r)
+			return
+		}
 		log.Printf("sandbox files download %s - DownloadFile error: %v", id, err)
 		http.Error(w, "failed to download file from sandbox", http.StatusInternalServerError)
 		return

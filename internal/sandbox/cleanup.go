@@ -3,14 +3,17 @@ package sandbox
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 )
 
+const cleanupConcurrency = 5
+
 // CleanupExpired scans for sandboxes whose last activity is older than the
-// configured session TTL and stops/removes their containers while marking them
-// as expired in the database.
+// configured session TTL and stops/removes their containers in parallel,
+// then soft-deletes the sandbox rows (MarkDeleted).
 func (m *Manager) CleanupExpired(ctx context.Context) error {
 	cutoff := time.Now().UTC().Add(-m.sessionTTL)
 
@@ -26,20 +29,37 @@ func (m *Manager) CleanupExpired(ctx context.Context) error {
 
 	log.Printf("sandbox manager - CleanupExpired found %d expired sandboxes", len(expired))
 
+	sem := make(chan struct{}, cleanupConcurrency)
+	var wg sync.WaitGroup
+
 	for _, sb := range expired {
-		if sb.ContainerID != "" {
-			_ = m.docker.ContainerStop(ctx, sb.ContainerID, container.StopOptions{})
-			_ = m.docker.ContainerRemove(ctx, sb.ContainerID, container.RemoveOptions{Force: true})
-		}
+		sb := sb
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
 
-		if err := m.sandboxRepo.Delete(ctx, sb.ID); err != nil {
-			log.Printf("sandbox manager - CleanupExpired Delete(%s) error: %v", sb.ID, err)
-			return err
-		}
+			if sb.ContainerID != "" {
+				_ = m.docker.ContainerStop(ctx, sb.ContainerID, container.StopOptions{})
+				_ = m.docker.ContainerRemove(ctx, sb.ContainerID, container.RemoveOptions{Force: true})
+			}
 
-		log.Printf("sandbox manager - CleanupExpired removed sandbox id=%s container_id=%s", sb.ID, sb.ContainerID)
+			now := time.Now().UTC()
+			if err := m.sandboxRepo.MarkDeleted(ctx, sb.ID, now); err != nil {
+				log.Printf("sandbox manager - CleanupExpired MarkDeleted(%s) error: %v", sb.ID, err)
+				return
+			}
+
+			log.Printf("sandbox manager - CleanupExpired removed sandbox id=%s container_id=%s", sb.ID, sb.ContainerID)
+		}()
 	}
 
+	wg.Wait()
 	return nil
 }
 

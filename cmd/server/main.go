@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -12,6 +13,17 @@ import (
 	"monza/backend/internal/httpserver"
 	"monza/backend/internal/sandbox"
 )
+
+func getHostID() string {
+	if id := os.Getenv("HOST_ID"); id != "" {
+		return id
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return "default"
+	}
+	return hostname
+}
 
 func main() {
 	if err := godotenv.Load(); err != nil {
@@ -65,8 +77,13 @@ func main() {
 	defer dockerClient.Close()
 
 	sessionTTL := 15 * time.Minute
-	manager := sandbox.NewManager(database, dockerClient, sessionTTL)
+	resourceLimits := getResourceLimits()
+	hostID := getHostID()
+	log.Printf("host id: %s", hostID)
+	manager := sandbox.NewManager(database, dockerClient, sessionTTL, resourceLimits, hostID)
 
+	manager.StartProvisionWorker(ctx)
+	manager.StartHeartbeatFlusher(ctx)
 	// Run cleanup worker to expire idle sandboxes.
 	manager.StartCleanupWorker(ctx, time.Minute)
 
@@ -84,5 +101,29 @@ func getAddr() string {
 	}
 
 	return ":8080"
+}
+
+// getResourceLimits reads SANDBOX_MEMORY_LIMIT (bytes) and SANDBOX_CPU_LIMIT
+// (number of CPUs, e.g. 1) from env with defaults 512MB and 1 CPU.
+func getResourceLimits() sandbox.ResourceLimits {
+	const (
+		defaultMemoryBytes = 512 * 1024 * 1024 // 512 MiB
+		defaultNanoCPUs    = 1e9                // 1 CPU
+	)
+	limits := sandbox.ResourceLimits{
+		Memory:   defaultMemoryBytes,
+		NanoCPUs: defaultNanoCPUs,
+	}
+	if v := os.Getenv("SANDBOX_MEMORY_LIMIT"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			limits.Memory = n
+		}
+	}
+	if v := os.Getenv("SANDBOX_CPU_LIMIT"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			limits.NanoCPUs = n * 1e9
+		}
+	}
+	return limits
 }
 

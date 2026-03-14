@@ -25,18 +25,19 @@ type PortMapping struct {
 }
 
 type Sandbox struct {
-	ID                 uuid.UUID            `json:"id"`
-	Name               string               `json:"name"`
-	Status             SandboxStatus        `json:"status"`
-	ContainerID        string               `json:"container_id"`
-	Image              string               `json:"image"`
-	WorkspaceMount     string               `json:"workspace_mount"`
-	DevcontainerConfig json.RawMessage      `json:"devcontainer_config,omitempty"`
-	EnvVars            map[string]string    `json:"env_vars,omitempty"`
-	PortMappings       []PortMapping        `json:"port_mappings,omitempty"`
-	LastActivity       time.Time            `json:"last_activity"`
-	CreatedAt          time.Time            `json:"created_at"`
-	ExpiresAt          *time.Time           `json:"expires_at,omitempty"`
-	DeletedAt          *time.Time           `json:"deleted_at,omitempty"`
+	ID                 uuid.UUID         `json:"id"`
+	Name               string            `json:"name"`
+	Status             SandboxStatus     `json:"status"`
+	ContainerID        string            `json:"container_id"`
+	Image              string            `json:"image"`
+	WorkspaceMount     string            `json:"workspace_mount"`
+	HostID             string            `json:"host_id,omitempty"`
+	DevcontainerConfig json.RawMessage  `json:"devcontainer_config,omitempty"`
+	EnvVars            map[string]string `json:"env_vars,omitempty"`
+	PortMappings       []PortMapping     `json:"port_mappings,omitempty"`
+	LastActivity       time.Time         `json:"last_activity"`
+	CreatedAt          time.Time         `json:"created_at"`
+	ExpiresAt          *time.Time        `json:"expires_at,omitempty"`
+	DeletedAt          *time.Time        `json:"deleted_at,omitempty"`
 }
 

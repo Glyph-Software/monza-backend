@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 
@@ -24,11 +25,27 @@ func devcontainerBasePath() string {
 }
 
 type SandboxesHandler struct {
-	manager *sandbox.Manager
+	manager      *sandbox.Manager
+	configCache  sync.Map // template name -> *devcontainer.Config
 }
 
 func NewSandboxesHandler(m *sandbox.Manager) *SandboxesHandler {
 	return &SandboxesHandler{manager: m}
+}
+
+// getDevcontainerConfig returns a parsed devcontainer config for the template,
+// using an in-memory cache to avoid repeated disk reads.
+func (h *SandboxesHandler) getDevcontainerConfig(template string) (*devcontainer.Config, error) {
+	if cached, ok := h.configCache.Load(template); ok {
+		return cached.(*devcontainer.Config), nil
+	}
+	configPath := filepath.Join(devcontainerBasePath(), template, "devcontainer.json")
+	cfg, err := devcontainer.ParseFile(configPath)
+	if err != nil {
+		return nil, err
+	}
+	h.configCache.Store(template, cfg)
+	return cfg, nil
 }
 
 type createSandboxRequest struct {
@@ -107,10 +124,9 @@ func (h *SandboxesHandler) create(w http.ResponseWriter, r *http.Request) {
 		req.Name = "sandbox-" + req.Template
 	}
 
-	configPath := filepath.Join(devcontainerBasePath(), req.Template, "devcontainer.json")
-	cfg, err := devcontainer.ParseFile(configPath)
+	cfg, err := h.getDevcontainerConfig(req.Template)
 	if err != nil {
-		log.Printf("create sandbox - failed to load devcontainer template from %s: %v", configPath, err)
+		log.Printf("create sandbox - failed to load devcontainer template %q: %v", req.Template, err)
 		http.Error(w, "failed to load devcontainer template: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -122,7 +138,7 @@ func (h *SandboxesHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, sb)
+	writeJSON(w, http.StatusAccepted, sb)
 }
 
 func (h *SandboxesHandler) list(w http.ResponseWriter, r *http.Request) {

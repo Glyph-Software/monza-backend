@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"log"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -17,6 +19,18 @@ import (
 	"monza/backend/pkg/models"
 )
 
+const defaultProvisionQueueSize = 256
+
+// ErrFileNotFound is returned by DownloadFile when the requested path does not exist in the container.
+var ErrFileNotFound = errors.New("file not found")
+
+// ResourceLimits holds CPU and memory limits applied to each sandbox container.
+// Zero values mean no limit (Docker default).
+type ResourceLimits struct {
+	Memory   int64 // memory limit in bytes; 0 = no limit
+	NanoCPUs int64 // CPU quota in units of 1e-9 CPU; 0 = no limit (1 CPU = 1e9)
+}
+
 // ExecuteResult mirrors the DeepAgents ExecuteResponse type.
 type ExecuteResult struct {
 	Output    string
@@ -25,23 +39,32 @@ type ExecuteResult struct {
 }
 
 type Manager struct {
-	sandboxRepo *repository.SandboxRepository
-	portRepo    *repository.PortRepository
-	docker      *docker.Client
-	sessionTTL  time.Duration
+	sandboxRepo     *repository.SandboxRepository
+	portRepo        *repository.PortRepository
+	docker          *docker.Client
+	sessionTTL      time.Duration
+	provisionQueue  chan uuid.UUID
+	resourceLimits  ResourceLimits
+	heartbeatBuffer sync.Map // uuid.UUID -> time.Time (in-memory buffer for batching)
+	hostID          string
 }
 
-func NewManager(database *db.DB, dockerClient *docker.Client, sessionTTL time.Duration) *Manager {
+func NewManager(database *db.DB, dockerClient *docker.Client, sessionTTL time.Duration, limits ResourceLimits, hostID string) *Manager {
 	return &Manager{
-		sandboxRepo: repository.NewSandboxRepository(database),
-		portRepo:    repository.NewPortRepository(database),
-		docker:      dockerClient,
-		sessionTTL:  sessionTTL,
+		sandboxRepo:     repository.NewSandboxRepository(database, hostID),
+		portRepo:        repository.NewPortRepository(database),
+		docker:          dockerClient,
+		sessionTTL:     sessionTTL,
+		provisionQueue: make(chan uuid.UUID, defaultProvisionQueueSize),
+		resourceLimits: limits,
+		hostID:          hostID,
 	}
 }
 
-// CreateFromDevcontainer creates a new sandbox from a parsed devcontainer.json
-// configuration and starts the underlying Docker container.
+// CreateFromDevcontainer inserts a sandbox record with status "creating" and
+// enqueues it for asynchronous provisioning. The actual image pull and
+// container create/start are performed by the provision worker; the caller
+// receives the sandbox immediately with status creating (202 Accepted).
 func (m *Manager) CreateFromDevcontainer(
 	ctx context.Context,
 	name string,
@@ -55,57 +78,93 @@ func (m *Manager) CreateFromDevcontainer(
 		return nil, errors.New("devcontainer image is required")
 	}
 
-	log.Printf("sandbox manager - creating sandbox name=%q image=%q", name, cfg.Image)
-
-	if err := m.docker.ImagePull(ctx, cfg.Image); err != nil {
-		log.Printf("sandbox manager - ImagePull(%q) failed: %v", cfg.Image, err)
-		return nil, err
-	}
+	log.Printf("sandbox manager - enqueueing sandbox name=%q image=%q", name, cfg.Image)
 
 	now := time.Now().UTC()
-
 	sb := &models.Sandbox{
 		ID:             uuid.New(),
 		Name:           name,
 		Status:         models.SandboxStatusCreating,
 		Image:          cfg.Image,
 		WorkspaceMount: workspaceMount,
+		HostID:         m.hostID,
 		LastActivity:   now,
 		CreatedAt:      now,
 	}
-
-	containerConfig := &container.Config{
-		Image: cfg.Image,
-		Tty:   true,
-		Env:   nil,
-	}
-
-	hostConfig := &container.HostConfig{}
-	if workspaceMount != "" {
-		hostConfig.Binds = []string{workspaceMount + ":/workspace"}
-	}
-
-	createResp, err := m.docker.ContainerCreate(ctx, containerConfig, hostConfig)
-	if err != nil {
-		log.Printf("sandbox manager - ContainerCreate failed: %v", err)
-		return nil, err
-	}
-
-	sb.ContainerID = createResp.ID
-	sb.Status = models.SandboxStatusRunning
 
 	if err := m.sandboxRepo.Insert(ctx, sb); err != nil {
 		log.Printf("sandbox manager - sandboxRepo.Insert failed: %v", err)
 		return nil, err
 	}
 
-	if err := m.docker.ContainerStart(ctx, sb.ContainerID); err != nil {
-		log.Printf("sandbox manager - ContainerStart(%s) failed: %v", sb.ContainerID, err)
-		return nil, err
+	select {
+	case m.provisionQueue <- sb.ID:
+	default:
+		log.Printf("sandbox manager - provision queue full, sandbox id=%s will not be provisioned", sb.ID)
+		_ = m.sandboxRepo.UpdateStatus(ctx, sb.ID, models.SandboxStatusError)
+		return nil, errors.New("provision queue full")
 	}
 
-	log.Printf("sandbox manager - created sandbox id=%s container_id=%s", sb.ID, sb.ContainerID)
 	return sb, nil
+}
+
+// provisionOne performs image pull, container create, and container start for
+// a sandbox that is in status "creating". Called by the provision worker.
+func (m *Manager) provisionOne(ctx context.Context, id uuid.UUID) {
+	sb, err := m.sandboxRepo.GetByID(ctx, id)
+	if err != nil || sb == nil {
+		if err != nil {
+			log.Printf("sandbox manager - provisionOne(%s) GetByID error: %v", id, err)
+		}
+		return
+	}
+	if sb.Status != models.SandboxStatusCreating {
+		return
+	}
+
+	if err := m.docker.ImagePull(ctx, sb.Image); err != nil {
+		log.Printf("sandbox manager - provisionOne(%s) ImagePull(%q) failed: %v", id, sb.Image, err)
+		_ = m.sandboxRepo.UpdateStatus(ctx, id, models.SandboxStatusError)
+		return
+	}
+
+	containerConfig := &container.Config{
+		Image: sb.Image,
+		Tty:   true,
+		Env:   nil,
+	}
+	hostConfig := &container.HostConfig{}
+	if sb.WorkspaceMount != "" {
+		hostConfig.Binds = []string{sb.WorkspaceMount + ":/workspace"}
+	}
+	if m.resourceLimits.Memory > 0 {
+		hostConfig.Resources.Memory = m.resourceLimits.Memory
+	}
+	if m.resourceLimits.NanoCPUs > 0 {
+		hostConfig.Resources.NanoCPUs = m.resourceLimits.NanoCPUs
+	}
+
+	createResp, err := m.docker.ContainerCreate(ctx, containerConfig, hostConfig)
+	if err != nil {
+		log.Printf("sandbox manager - provisionOne(%s) ContainerCreate failed: %v", id, err)
+		_ = m.sandboxRepo.UpdateStatus(ctx, id, models.SandboxStatusError)
+		return
+	}
+
+	if err := m.sandboxRepo.SetContainerReady(ctx, id, createResp.ID); err != nil {
+		log.Printf("sandbox manager - provisionOne(%s) SetContainerReady failed: %v", id, err)
+		_ = m.docker.ContainerRemove(ctx, createResp.ID, container.RemoveOptions{Force: true})
+		return
+	}
+
+	if err := m.docker.ContainerStart(ctx, createResp.ID); err != nil {
+		log.Printf("sandbox manager - provisionOne(%s) ContainerStart failed: %v", id, err)
+		_ = m.sandboxRepo.UpdateStatus(ctx, id, models.SandboxStatusError)
+		_ = m.docker.ContainerRemove(ctx, createResp.ID, container.RemoveOptions{Force: true})
+		return
+	}
+
+	log.Printf("sandbox manager - provisioned sandbox id=%s container_id=%s", id, createResp.ID)
 }
 
 func (m *Manager) GetSandbox(ctx context.Context, id uuid.UUID) (*models.Sandbox, error) {
@@ -260,6 +319,9 @@ func (m *Manager) DownloadFile(
 	rc, err := m.docker.CopyFromContainer(ctx, sb.ContainerID, srcPath)
 	if err != nil {
 		log.Printf("sandbox manager - DownloadFile(%s) CopyFromContainer error: %v", id, err)
+		if strings.Contains(err.Error(), "no such file or directory") {
+			return nil, ErrFileNotFound
+		}
 		return nil, err
 	}
 
