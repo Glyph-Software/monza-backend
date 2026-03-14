@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/joho/godotenv"
 	"monza/backend/internal/db"
 	"monza/backend/internal/docker"
 	"monza/backend/internal/httpserver"
@@ -13,6 +14,10 @@ import (
 )
 
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Printf("no .env file found (optional): %v", err)
+	}
+
 	addr := getAddr()
 
 	ctx, cancel := context.WithCancel(context.Background())

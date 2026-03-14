@@ -7,6 +7,8 @@ It exposes:
 - `/health` – service health check.
 - `/hello` – simple hello world endpoint.
 - `/api/sandboxes` – CRUD + heartbeat API for sandbox lifecycle.
+- `/api/sandboxes/{id}/files/upload` – upload a file into a sandbox container.
+- `/api/sandboxes/{id}/files/download` – download a file from a sandbox container.
 
 The service creates Docker containers from `devcontainer.json` templates, tracks them in PostgreSQL, and automatically cleans up idle sandboxes after a configurable TTL (15 minutes by default).
 
@@ -33,6 +35,9 @@ The service creates Docker containers from `devcontainer.json` templates, tracks
       - `GET /api/sandboxes/{id}`
       - `DELETE /api/sandboxes/{id}`
       - `POST /api/sandboxes/{id}/heartbeat`
+      - `POST /api/sandboxes/{id}/execute`
+      - `POST /api/sandboxes/{id}/files/upload`
+      - `GET /api/sandboxes/{id}/files/download`
 
 - **Handlers**
   - `internal/handlers/health.go` – JSON health response.
@@ -42,6 +47,8 @@ The service creates Docker containers from `devcontainer.json` templates, tracks
     - Loads devcontainer templates.
     - Delegates to the sandbox manager.
     - Returns JSON responses and errors.
+  - `internal/handlers/sandbox_execute.go` – run commands inside a sandbox (`POST /api/sandboxes/{id}/execute`).
+  - `internal/handlers/sandbox_files.go` – file upload and download to/from a sandbox container.
 
 - **Sandbox domain**
   - `internal/sandbox/*`, `pkg/models/sandbox.go`
@@ -65,7 +72,7 @@ The service creates Docker containers from `devcontainer.json` templates, tracks
       - `DEVCONTAINERS_PATH` (if set), or
       - local `./devcontainers` directory.
   - `internal/docker/*`
-    - Thin wrapper around the Docker SDK for creating, starting, and cleaning up containers.
+    - Thin wrapper around the Docker SDK for creating, starting, and cleaning up containers, and for copying files in/out via `CopyToContainer` and `CopyFromContainer`.
 
 For a more narrative overview, also see `SANDBOX.md`.
 
@@ -298,6 +305,50 @@ curl -X DELETE http://localhost:8080/api/sandboxes/<sandbox-id>
 curl -X POST http://localhost:8080/api/sandboxes/<sandbox-id>/heartbeat
 ```
 
+#### Upload file to sandbox
+
+- **POST `/api/sandboxes/{id}/files/upload`**
+
+  - **Description**: Uploads a single file into the sandbox’s container filesystem.
+  - **Path params**:
+    - `id` – sandbox UUID.
+  - **Request**: `multipart/form-data` with:
+    - `file` – the file to upload (required).
+    - `path` – destination directory inside the container (optional; default `/workspace`).
+  - **Responses**:
+    - `200 OK` with JSON: `{"status":"ok","path":"/workspace/filename"}`.
+    - `400 Bad Request` if the sandbox id is invalid, no file is provided, or the request body exceeds the limit (100 MB).
+    - `500 Internal Server Error` if the sandbox/container is not found or the copy fails.
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:8080/api/sandboxes/<sandbox-id>/files/upload \
+  -F "file=@./main.go" \
+  -F "path=/workspace"
+```
+
+#### Download file from sandbox
+
+- **GET `/api/sandboxes/{id}/files/download?path=...`**
+
+  - **Description**: Streams a single file from the sandbox’s container to the client.
+  - **Path params**:
+    - `id` – sandbox UUID.
+  - **Query params**:
+    - `path` – full path to the file inside the container (e.g. `/workspace/main.go`) (required).
+  - **Responses**:
+    - `200 OK` with the raw file content, `Content-Disposition: attachment`, and `Content-Type` set from the file.
+    - `400 Bad Request` if `path` is missing or the sandbox id is invalid.
+    - `404 Not Found` if the path does not exist or the archive is empty.
+    - `500 Internal Server Error` if the sandbox/container is not found or the copy fails.
+
+**Example:**
+
+```bash
+curl -o main.go "http://localhost:8080/api/sandboxes/<sandbox-id>/files/download?path=/workspace/main.go"
+```
+
 ---
 
 ### Sandbox lifecycle
@@ -307,7 +358,7 @@ High‑level lifecycle (also described in `SANDBOX.md`):
 1. **Create** – `POST /api/sandboxes` with a `template` name.
 2. **Provision** – backend reads `devcontainers/{template}/devcontainer.json` (or from `DEVCONTAINERS_PATH`) and creates a Docker container.
 3. **Persist** – sandbox metadata, ports, and timestamps are stored in PostgreSQL.
-4. **Use** – clients connect to mapped ports (e.g. editors, terminals, HTTP services inside the container).
+4. **Use** – clients connect to mapped ports (e.g. editors, terminals, HTTP services inside the container), and can upload/download files via `POST /api/sandboxes/{id}/files/upload` and `GET /api/sandboxes/{id}/files/download`.
 5. **Heartbeat** – clients periodically call `POST /api/sandboxes/{id}/heartbeat` to keep the sandbox alive.
 6. **Cleanup** – background worker expires and deletes sandboxes idle longer than the configured TTL (15 minutes by default), updating their status to `expired` / `deleted`.
 
@@ -317,7 +368,7 @@ High‑level lifecycle (also described in `SANDBOX.md`):
 
 - `cmd/server` – main server binary.
 - `internal/httpserver` – HTTP server setup and routing.
-- `internal/handlers` – HTTP handlers (`/health`, `/hello`, `/api/sandboxes`).
+- `internal/handlers` – HTTP handlers (`/health`, `/hello`, `/api/sandboxes`, sandbox execute, sandbox files).
 - `internal/sandbox` – sandbox manager, heartbeat handling, cleanup worker.
 - `internal/devcontainer` – devcontainer.json parsing.
 - `internal/docker` – Docker client wrapper.

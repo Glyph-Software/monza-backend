@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
 	"time"
 
@@ -204,5 +205,68 @@ func (m *Manager) Execute(ctx context.Context, id uuid.UUID, command string, max
 		ExitCode:  res.ExitCode,
 		Truncated: res.Truncated,
 	}, nil
+}
+
+// UploadFile copies a tar archive (content) into the sandbox's container at
+// the given destination path. The content reader must provide a valid tar
+// stream, and the caller is responsible for choosing an appropriate path
+// (e.g. /workspace).
+func (m *Manager) UploadFile(
+	ctx context.Context,
+	id uuid.UUID,
+	dstPath string,
+	content io.Reader,
+) error {
+	sb, err := m.sandboxRepo.GetByID(ctx, id)
+	if err != nil {
+		log.Printf("sandbox manager - UploadFile(%s) GetByID error: %v", id, err)
+		return err
+	}
+	if sb == nil || sb.ContainerID == "" {
+		log.Printf("sandbox manager - UploadFile(%s) no-op (sandbox or container not found)", id)
+		return errors.New("sandbox or container not found")
+	}
+
+	if err := m.docker.CopyToContainer(ctx, sb.ContainerID, dstPath, content); err != nil {
+		log.Printf("sandbox manager - UploadFile(%s) CopyToContainer error: %v", id, err)
+		return err
+	}
+
+	if err := m.sandboxRepo.UpdateLastActivity(ctx, id, time.Now().UTC()); err != nil {
+		log.Printf("sandbox manager - UploadFile(%s) UpdateLastActivity error: %v", id, err)
+	}
+
+	return nil
+}
+
+// DownloadFile returns a tar archive stream for the given path inside the
+// sandbox's container. The caller is responsible for closing the returned
+// ReadCloser and extracting the desired file from the tar stream.
+func (m *Manager) DownloadFile(
+	ctx context.Context,
+	id uuid.UUID,
+	srcPath string,
+) (io.ReadCloser, error) {
+	sb, err := m.sandboxRepo.GetByID(ctx, id)
+	if err != nil {
+		log.Printf("sandbox manager - DownloadFile(%s) GetByID error: %v", id, err)
+		return nil, err
+	}
+	if sb == nil || sb.ContainerID == "" {
+		log.Printf("sandbox manager - DownloadFile(%s) no-op (sandbox or container not found)", id)
+		return nil, errors.New("sandbox or container not found")
+	}
+
+	rc, err := m.docker.CopyFromContainer(ctx, sb.ContainerID, srcPath)
+	if err != nil {
+		log.Printf("sandbox manager - DownloadFile(%s) CopyFromContainer error: %v", id, err)
+		return nil, err
+	}
+
+	if err := m.sandboxRepo.UpdateLastActivity(ctx, id, time.Now().UTC()); err != nil {
+		log.Printf("sandbox manager - DownloadFile(%s) UpdateLastActivity error: %v", id, err)
+	}
+
+	return rc, nil
 }
 

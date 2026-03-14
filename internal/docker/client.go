@@ -67,6 +67,32 @@ func (c *Client) ContainerRemove(ctx context.Context, containerID string, opts c
 	return c.cli.ContainerRemove(ctx, containerID, opts)
 }
 
+// CopyToContainer uploads the given tar archive content into the container's
+// filesystem at dstPath. The content reader must provide a valid tar stream.
+func (c *Client) CopyToContainer(
+	ctx context.Context,
+	containerID string,
+	dstPath string,
+	content io.Reader,
+) error {
+	return c.cli.CopyToContainer(ctx, containerID, dstPath, content, container.CopyToContainerOptions{})
+}
+
+// CopyFromContainer streams a tar archive of the given path from the container's
+// filesystem. The caller is responsible for closing the returned ReadCloser and
+// interpreting the tar stream.
+func (c *Client) CopyFromContainer(
+	ctx context.Context,
+	containerID string,
+	srcPath string,
+) (io.ReadCloser, error) {
+	rc, _, err := c.cli.CopyFromContainer(ctx, containerID, srcPath)
+	if err != nil {
+		return nil, err
+	}
+	return rc, nil
+}
+
 // ExecResult is a simplified representation of a command executed inside
 // a container. It is intentionally similar to DeepAgents' ExecuteResponse.
 type ExecResult struct {
