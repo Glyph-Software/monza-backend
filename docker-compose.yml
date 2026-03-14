@@ -1,0 +1,40 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sandbox
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: sandboxdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sandbox -d sandboxdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  sandbox-service:
+    build: .
+    user: "0:0"  # run as root so the process can access the host Docker socket
+    environment:
+      DATABASE_URL: postgres://sandbox:secret@postgres:5432/sandboxdb?sslmode=disable
+      DOCKER_HOST: unix:///var/run/docker.sock
+      SERVER_ADDR: ":8080"
+    volumes:
+      # Podman machine API socket (bind-mount as file so Podman doesn't try to mkdir it)
+      - type: bind
+        source: /var/folders/hy/s4c_ns4x7qs8v7n6y6gwc9gh0000gn/T/podman/podman-machine-default-api.sock
+        target: /var/run/docker.sock
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+

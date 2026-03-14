@@ -1,0 +1,42 @@
+### Go build artifacts
+bin/
+build/
+dist/
+
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+*.test
+*.out
+
+# Go coverage
+coverage.*
+*.coverprofile
+*.cov
+
+### Go modules & cache
+vendor/
+go.work
+go.work.sum
+
+# Local tooling
+.env
+.env.*
+
+### IDE & editor files
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+
+### Logs & tmp
+*.log
+logs/
+tmp/
+*.tmp
