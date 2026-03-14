@@ -16,6 +16,13 @@ import (
 	"monza/backend/pkg/models"
 )
 
+// ExecuteResult mirrors the DeepAgents ExecuteResponse type.
+type ExecuteResult struct {
+	Output    string
+	ExitCode  int
+	Truncated bool
+}
+
 type Manager struct {
 	sandboxRepo *repository.SandboxRepository
 	portRepo    *repository.PortRepository
@@ -164,5 +171,38 @@ func (m *Manager) DeleteSandbox(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// Execute runs a shell command inside the sandbox's Docker container and returns
+// a DeepAgents-compatible ExecuteResult. Output is capped at maxOutputBytes.
+func (m *Manager) Execute(ctx context.Context, id uuid.UUID, command string, maxOutputBytes int) (*ExecuteResult, error) {
+	sb, err := m.sandboxRepo.GetByID(ctx, id)
+	if err != nil {
+		log.Printf("sandbox manager - Execute(%s) GetByID error: %v", id, err)
+		return nil, err
+	}
+	if sb == nil || sb.ContainerID == "" {
+		log.Printf("sandbox manager - Execute(%s) no-op (sandbox or container not found)", id)
+		return &ExecuteResult{
+			Output:    "sandbox or container not found",
+			ExitCode:  1,
+			Truncated: false,
+		}, nil
+	}
 
+	res, err := m.docker.Exec(ctx, sb.ContainerID, command, maxOutputBytes)
+	if err != nil {
+		log.Printf("sandbox manager - Exec(%s) command %q error: %v", id, command, err)
+		return nil, err
+	}
+
+	// Update last activity timestamp on successful execution.
+	if err := m.sandboxRepo.UpdateLastActivity(ctx, id, time.Now().UTC()); err != nil {
+		log.Printf("sandbox manager - Execute(%s) UpdateLastActivity error: %v", id, err)
+	}
+
+	return &ExecuteResult{
+		Output:    res.Output,
+		ExitCode:  res.ExitCode,
+		Truncated: res.Truncated,
+	}, nil
+}
 
