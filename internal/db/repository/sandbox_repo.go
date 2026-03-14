@@ -183,6 +183,13 @@ func (r *SandboxRepository) MarkExpired(ctx context.Context, id uuid.UUID, expir
 	return err
 }
 
+// Delete removes the sandbox row by id. port_mappings and activity_logs are
+// removed automatically via ON DELETE CASCADE.
+func (r *SandboxRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	_, err := r.db.Pool.Exec(ctx, `DELETE FROM sandboxes WHERE id = $1`, id)
+	return err
+}
+
 func (r *SandboxRepository) FindExpired(ctx context.Context, cutoff time.Time) ([]models.Sandbox, error) {
 	rows, err := r.db.Pool.Query(ctx, `
 		SELECT id, name, status, container_id, image, workspace_mount,

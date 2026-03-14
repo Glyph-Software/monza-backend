@@ -32,12 +32,12 @@ func (m *Manager) CleanupExpired(ctx context.Context) error {
 			_ = m.docker.ContainerRemove(ctx, sb.ContainerID, container.RemoveOptions{Force: true})
 		}
 
-		if err := m.sandboxRepo.MarkExpired(ctx, sb.ID, time.Now().UTC()); err != nil {
-			log.Printf("sandbox manager - CleanupExpired MarkExpired(%s) error: %v", sb.ID, err)
+		if err := m.sandboxRepo.Delete(ctx, sb.ID); err != nil {
+			log.Printf("sandbox manager - CleanupExpired Delete(%s) error: %v", sb.ID, err)
 			return err
 		}
 
-		log.Printf("sandbox manager - CleanupExpired expired sandbox id=%s container_id=%s", sb.ID, sb.ContainerID)
+		log.Printf("sandbox manager - CleanupExpired removed sandbox id=%s container_id=%s", sb.ID, sb.ContainerID)
 	}
 
 	return nil
