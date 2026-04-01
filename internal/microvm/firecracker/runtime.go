@@ -142,7 +142,7 @@ func (r *Runtime) Provision(ctx context.Context, opts microvm.ProvisionOpts) (st
 		vcpus = 1
 	}
 
-	kernelArgs := "console=ttyS0 reboot=k panic=1 pci=off init=/init"
+	kernelArgs := "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/init"
 	for k, v := range opts.EnvVars {
 		kernelArgs += fmt.Sprintf(" monza.env.%s=%s", k, v)
 	}
