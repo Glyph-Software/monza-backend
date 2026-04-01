@@ -19,16 +19,15 @@ services:
 
   sandbox-service:
     build: .
-    user: "0:0"  # run as root so the process can access the host Docker socket
+    privileged: true
     environment:
       DATABASE_URL: postgres://sandbox:secret@postgres:5432/sandboxdb?sslmode=disable
-      DOCKER_HOST: unix:///var/run/docker.sock
       SERVER_ADDR: ":8080"
-    volumes:
-      # Podman machine API socket (bind-mount as file so Podman doesn't try to mkdir it)
-      - type: bind
-        source: /var/folders/hy/s4c_ns4x7qs8v7n6y6gwc9gh0000gn/T/podman/podman-machine-default-api.sock
-        target: /var/run/docker.sock
+      MONZA_AGENT_BIN: "/app/monza-agent"
+      MONZA_INIT_SCRIPT: "/app/assets/init"
+      MONZA_NETWORK_SUBNET: "172.16.0.0/16"
+    devices:
+      - /dev/kvm:/dev/kvm
     ports:
       - "8080:8080"
     depends_on:
@@ -37,4 +36,3 @@ services:
 
 volumes:
   postgres_data:
-

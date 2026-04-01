@@ -1,0 +1,22 @@
+#!/bin/sh
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sys /sys 2>/dev/null
+mount -t devtmpfs dev /dev 2>/dev/null
+mount -t tmpfs tmp /tmp 2>/dev/null
+mkdir -p /dev/pts
+mount -t devpts devpts /dev/pts 2>/dev/null
+
+# Parse environment variables passed via kernel cmdline (key=val pairs after --)
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+        monza.env.*)
+            kv="${arg#monza.env.}"
+            export "$kv"
+            ;;
+        monza.hostname=*)
+            hostname "${arg#monza.hostname=}"
+            ;;
+    esac
+done
+
+exec /usr/local/bin/monza-agent

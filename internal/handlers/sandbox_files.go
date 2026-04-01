@@ -1,8 +1,6 @@
 package handlers
 
 import (
-	"archive/tar"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -22,8 +19,9 @@ import (
 // FilesHandler exposes file upload and download endpoints for a sandbox.
 //
 // Routes:
-//   POST /api/sandboxes/{id}/files/upload
-//   GET  /api/sandboxes/{id}/files/download?path=/workspace/main.go
+//
+//	POST /api/sandboxes/{id}/files/upload
+//	GET  /api/sandboxes/{id}/files/download?path=/workspace/main.go
 type FilesHandler struct {
 	manager *sandbox.Manager
 }
@@ -36,10 +34,10 @@ const (
 	maxUploadBytes = 100 * 1024 * 1024 // 100 MiB
 )
 
-// HandleUpload uploads a single file into the sandbox container.
+// HandleUpload uploads a single file into the sandbox VM.
 // The request must be multipart/form-data with:
 //   - field "file": the file to upload
-//   - optional field "path": destination directory inside the container (default: /workspace)
+//   - optional field "path": destination directory inside the VM (default: /workspace)
 func (h *FilesHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -90,47 +88,9 @@ func (h *FilesHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tarBuf := &bytes.Buffer{}
-	tw := tar.NewWriter(tarBuf)
-
-	size := header.Size
-	if size < 0 {
-		log.Printf("sandbox files upload %s - unknown file size for %q", id, filename)
-		http.Error(w, "failed to determine file size", http.StatusBadRequest)
-		_ = tw.Close()
-		return
-	}
-
-	hdr := &tar.Header{
-		Name:    filename,
-		Mode:    0o644,
-		Size:    size,
-		ModTime: time.Now(),
-	}
-
-	if err := tw.WriteHeader(hdr); err != nil {
-		log.Printf("sandbox files upload %s - WriteHeader error: %v", id, err)
-		http.Error(w, "failed to prepare archive", http.StatusInternalServerError)
-		_ = tw.Close()
-		return
-	}
-
-	if _, err := io.Copy(tw, file); err != nil {
-		log.Printf("sandbox files upload %s - writing tar content error: %v", id, err)
-		http.Error(w, "failed to read uploaded file", http.StatusInternalServerError)
-		_ = tw.Close()
-		return
-	}
-
-	if err := tw.Close(); err != nil {
-		log.Printf("sandbox files upload %s - closing tar writer error: %v", id, err)
-		http.Error(w, "failed to finalize archive", http.StatusInternalServerError)
-		return
-	}
-
 	log.Printf("HTTP %s %s - uploading file %q to sandbox %s at %q", r.Method, r.URL.Path, filename, id, dstPath)
 
-	if err := h.manager.UploadFile(r.Context(), id, dstPath, bytes.NewReader(tarBuf.Bytes())); err != nil {
+	if err := h.manager.UploadFile(r.Context(), id, dstPath, filename, file); err != nil {
 		log.Printf("sandbox files upload %s - UploadFile error: %v", id, err)
 		http.Error(w, "failed to upload file to sandbox", http.StatusInternalServerError)
 		return
@@ -144,9 +104,9 @@ func (h *FilesHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// HandleDownload streams a single file from the sandbox container to the client.
+// HandleDownload streams a single file from the sandbox VM to the client.
 // The request must provide a "path" query parameter indicating the full path
-// inside the container (e.g. /workspace/main.go).
+// inside the VM (e.g. /workspace/main.go).
 func (h *FilesHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -174,7 +134,7 @@ func (h *FilesHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("HTTP %s %s - downloading file %q from sandbox %s", r.Method, r.URL.Path, srcPath, id)
 
-	rc, err := h.manager.DownloadFile(r.Context(), id, srcPath)
+	rc, size, err := h.manager.DownloadFile(r.Context(), id, srcPath)
 	if err != nil {
 		if errors.Is(err, sandbox.ErrFileNotFound) {
 			http.NotFound(w, r)
@@ -186,26 +146,13 @@ func (h *FilesHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 
-	tr := tar.NewReader(rc)
-	hdr, err := tr.Next()
-	if err != nil {
-		if err == io.EOF {
-			http.Error(w, "file not found", http.StatusNotFound)
-			return
-		}
-		log.Printf("sandbox files download %s - tar.Next error: %v", id, err)
-		http.Error(w, "failed to read file from archive", http.StatusInternalServerError)
-		return
-	}
-
-	filename := filepath.Base(hdr.Name)
-	if filename == "" {
+	filename := filepath.Base(srcPath)
+	if filename == "" || filename == "." {
 		filename = "file"
 	}
 
-	// Peek at up to 512 bytes to detect content type, then stream the rest.
 	peek := make([]byte, 512)
-	n, readErr := io.ReadFull(tr, peek)
+	n, readErr := io.ReadFull(rc, peek)
 	if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
 		log.Printf("sandbox files download %s - ReadFull error: %v", id, readErr)
 		http.Error(w, "failed to read file content", http.StatusInternalServerError)
@@ -219,8 +166,8 @@ func (h *FilesHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
-	if hdr.Size > 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(hdr.Size, 10))
+	if size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -232,7 +179,7 @@ func (h *FilesHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if _, err := io.Copy(w, tr); err != nil {
+	if _, err := io.Copy(w, rc); err != nil {
 		log.Printf("sandbox files download %s - error streaming file: %v", id, err)
 		return
 	}
@@ -245,7 +192,6 @@ func sanitizeFilename(hdr *multipart.FileHeader) string {
 	if name == "" || name == "." || name == string(filepath.Separator) {
 		return ""
 	}
-	// Basic length guard; more validation can be added if needed.
 	if len(name) > 255 {
 		return name[:255]
 	}
@@ -261,4 +207,3 @@ func joinContainerPath(dir, name string) string {
 	}
 	return dir + name
 }
-

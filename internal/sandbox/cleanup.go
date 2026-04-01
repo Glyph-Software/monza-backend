@@ -5,15 +5,13 @@ import (
 	"log"
 	"sync"
 	"time"
-
-	"github.com/docker/docker/api/types/container"
 )
 
 const cleanupConcurrency = 5
 
 // CleanupExpired scans for sandboxes whose last activity is older than the
-// configured session TTL and stops/removes their containers in parallel,
-// then soft-deletes the sandbox rows (MarkDeleted).
+// configured session TTL, destroys their VMs in parallel, then soft-deletes
+// the sandbox rows.
 func (m *Manager) CleanupExpired(ctx context.Context) error {
 	cutoff := time.Now().UTC().Add(-m.sessionTTL)
 
@@ -45,8 +43,7 @@ func (m *Manager) CleanupExpired(ctx context.Context) error {
 			}
 
 			if sb.ContainerID != "" {
-				_ = m.docker.ContainerStop(ctx, sb.ContainerID, container.StopOptions{})
-				_ = m.docker.ContainerRemove(ctx, sb.ContainerID, container.RemoveOptions{Force: true})
+				_ = m.runtime.Destroy(ctx, sb.ContainerID)
 			}
 
 			now := time.Now().UTC()
@@ -55,11 +52,10 @@ func (m *Manager) CleanupExpired(ctx context.Context) error {
 				return
 			}
 
-			log.Printf("sandbox manager - CleanupExpired removed sandbox id=%s container_id=%s", sb.ID, sb.ContainerID)
+			log.Printf("sandbox manager - CleanupExpired removed sandbox id=%s handle=%s", sb.ID, sb.ContainerID)
 		}()
 	}
 
 	wg.Wait()
 	return nil
 }
-

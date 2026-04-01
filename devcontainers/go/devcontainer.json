@@ -1,15 +1,6 @@
 {
   "name": "Go Sandbox",
-  "image": "mcr.microsoft.com/devcontainers/go:1.22",
-  "features": {
-    "ghcr.io/devcontainers/features/git:1": {}
-  },
+  "image": "golang:1.22",
   "postCreateCommand": "go version",
-  "forwardPorts": [8080],
-  "customizations": {
-    "vscode": {
-      "extensions": ["golang.Go"]
-    }
-  }
+  "forwardPorts": [8080]
 }
-
