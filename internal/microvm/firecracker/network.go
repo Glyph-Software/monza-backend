@@ -7,8 +7,39 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strings"
 	"sync"
 )
+
+// tapNameFromHandle returns a Linux netdev name (max 15 chars) that stays
+// unique per sandbox. Truncating "tap-"+fullHandle to 15 bytes makes every
+// "my-python-sandbox-<id>" collide as "tap-my-python-s".
+func tapNameFromHandle(handle string) string {
+	const maxLen = 15
+	suffix := handle
+	if i := strings.LastIndex(handle, "-"); i >= 0 && i+1 < len(handle) {
+		suffix = strings.TrimSpace(handle[i+1:])
+	}
+	var b strings.Builder
+	for _, r := range suffix {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		}
+		if b.Len() >= 10 {
+			break
+		}
+	}
+	suf := b.String()
+	if suf == "" {
+		suf = "0"
+	}
+	name := "tap-" + suf
+	if len(name) > maxLen {
+		name = name[:maxLen]
+	}
+	return name
+}
 
 // ipAllocator hands out /30 subnets from a larger block for point-to-point
 // links between the host TAP and the guest VM.
@@ -66,38 +97,64 @@ func (a *ipAllocator) ipAt(offset uint32) net.IP {
 
 // setupTAP creates a TAP device and assigns the host IP.
 func setupTAP(name string, hostIP net.IP) error {
-	if err := run("ip", "tuntap", "add", "dev", name, "mode", "tap"); err != nil {
-		return fmt.Errorf("create TAP %s: %w", name, err)
+	// Remove stale interface from a crashed prior run (ignore errors).
+	_, _ = exec.Command("ip", "link", "delete", name).CombinedOutput()
+
+	out, err := exec.Command("ip", "tuntap", "add", "dev", name, "mode", "tap").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("create TAP %s: %w: %s", name, err, strings.TrimSpace(string(out)))
 	}
-	if err := run("ip", "addr", "add", hostIP.String()+"/30", "dev", name); err != nil {
+	out, err = exec.Command("ip", "addr", "add", hostIP.String()+"/30", "dev", name).CombinedOutput()
+	if err != nil {
 		teardownTAP(name)
-		return fmt.Errorf("assign IP to %s: %w", name, err)
+		return fmt.Errorf("assign IP to %s: %w: %s", name, err, strings.TrimSpace(string(out)))
 	}
-	if err := run("ip", "link", "set", name, "up"); err != nil {
+	out, err = exec.Command("ip", "link", "set", name, "up").CombinedOutput()
+	if err != nil {
 		teardownTAP(name)
-		return fmt.Errorf("bring up %s: %w", name, err)
+		return fmt.Errorf("bring up %s: %w: %s", name, err, strings.TrimSpace(string(out)))
 	}
 
-	_ = run("sysctl", "-w", "net.ipv4.ip_forward=1")
-	_ = run("iptables", "-t", "nat", "-A", "POSTROUTING", "-o", "eth0", "-j", "MASQUERADE")
-	_ = run("iptables", "-A", "FORWARD", "-i", name, "-j", "ACCEPT")
-	_ = run("iptables", "-A", "FORWARD", "-o", name, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+	_ = exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1").Run()
+	wan := defaultWANInterface()
+	if wan != "" {
+		// One MASQUERADE rule per WAN iface; avoid stacking duplicates per sandbox.
+		if err := exec.Command("iptables", "-t", "nat", "-C", "POSTROUTING", "-o", wan, "-j", "MASQUERADE").Run(); err != nil {
+			_, _ = exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "-o", wan, "-j", "MASQUERADE").CombinedOutput()
+		}
+	}
+	_, _ = exec.Command("iptables", "-A", "FORWARD", "-i", name, "-j", "ACCEPT").CombinedOutput()
+	_, _ = exec.Command("iptables", "-A", "FORWARD", "-o", name, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT").CombinedOutput()
 
 	return nil
 }
 
+// defaultWANInterface returns the interface used for the default route (e.g.
+// ens5 on EC2), or empty if unknown. Falls back so MASQUERADE is not applied
+// to a non-existent "eth0".
+func defaultWANInterface() string {
+	out, err := exec.Command("ip", "-4", "route", "show", "default").CombinedOutput()
+	if err != nil {
+		return "eth0"
+	}
+	// Typical: "default via 172.31.0.1 dev ens5 proto dhcp ..."
+	fields := strings.Fields(string(out))
+	for i := 0; i < len(fields)-1; i++ {
+		if fields[i] == "dev" && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return "eth0"
+}
+
 // teardownTAP removes a TAP device.
 func teardownTAP(name string) {
-	_ = run("iptables", "-D", "FORWARD", "-i", name, "-j", "ACCEPT")
-	_ = run("iptables", "-D", "FORWARD", "-o", name, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
-	_ = run("ip", "link", "delete", name)
+	_, _ = exec.Command("iptables", "-D", "FORWARD", "-i", name, "-j", "ACCEPT").CombinedOutput()
+	_, _ = exec.Command("iptables", "-D", "FORWARD", "-o", name, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT").CombinedOutput()
+	_, _ = exec.Command("ip", "link", "delete", name).CombinedOutput()
 }
 
 // generateMAC creates a locally-administered MAC address from a CID.
 func generateMAC(cid uint32) string {
 	return fmt.Sprintf("02:FC:00:00:%02X:%02X", byte(cid>>8), byte(cid))
-}
-
-func run(name string, args ...string) error {
-	return exec.Command(name, args...).Run()
 }

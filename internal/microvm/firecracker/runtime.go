@@ -175,10 +175,7 @@ func (r *Runtime) Provision(ctx context.Context, opts microvm.ProvisionOpts) (st
 		if err != nil {
 			return "", fmt.Errorf("allocate IP: %w", err)
 		}
-		tapName = "tap-" + handle
-		if len(tapName) > 15 {
-			tapName = tapName[:15]
-		}
+		tapName = tapNameFromHandle(handle)
 
 		if err := setupTAP(tapName, hostIP); err != nil {
 			r.ipAlloc.Release(handle)
