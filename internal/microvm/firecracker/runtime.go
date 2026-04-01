@@ -133,6 +133,15 @@ func (r *Runtime) Provision(ctx context.Context, opts microvm.ProvisionOpts) (st
 	r.nextCID++
 	r.mu.Unlock()
 
+	// Firecracker binds a host UDS per vsock device. A relative path like "vsock"
+	// resolves against the process working directory, so every VM collides
+	// (EADDRINUSE). Use one absolute path under this VM's socketDir.
+	vsockUDS, err := filepath.Abs(filepath.Join(socketDir, fmt.Sprintf("vsock-%d.sock", cid)))
+	if err != nil {
+		r.cleanup(handle, instanceRootfs, socketDir, "")
+		return "", fmt.Errorf("vsock path: %w", err)
+	}
+
 	mem := int64(opts.MemoryMiB)
 	if mem <= 0 {
 		mem = 512
@@ -165,7 +174,7 @@ func (r *Runtime) Provision(ctx context.Context, opts microvm.ProvisionOpts) (st
 			},
 		},
 		VsockDevices: []sdk.VsockDevice{
-			{Path: "vsock", CID: cid},
+			{Path: vsockUDS, CID: cid},
 		},
 	}
 
@@ -215,9 +224,8 @@ func (r *Runtime) Provision(ctx context.Context, opts microvm.ProvisionOpts) (st
 		return "", fmt.Errorf("start machine: %w", err)
 	}
 
-	vsockPath := filepath.Join(socketDir, fmt.Sprintf("vsock-%d", cid))
 	agentClient, err := agentclient.Dial(ctx, func() (net.Conn, error) {
-		return net.Dial("unix", vsockPath)
+		return net.Dial("unix", vsockUDS)
 	})
 	if err != nil {
 		machine.StopVMM()
